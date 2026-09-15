@@ -77,6 +77,181 @@ borligi aniqlandi (`npm audit`). Shuning uchun darhol xavfsiz Next.js
 (`await cookies()`, `await params` va h.k.). ESLint ham 9'ga ko'tarildi
 (`eslint-config-next@16` shuni talab qiladi), flat config: `eslint.config.mjs`.
 
+## Xavfsizlik (Auth / RLS auditi)
+
+Ushbu bo'lim Auth va RLS bo'yicha o'tkazilgan xavfsizlik auditi natijalarini
+saqlaydi. Auth/RLS'ga tegishli har qanday o'zgarishdan keyin shu bo'limni
+yangilang.
+
+### JWT — qanday imzolanadi va tekshiriladi
+
+- **Algoritm**: HS256 (simmetrik). **Secret**: Supabase loyihasining
+  haqiqiy JWT Secret'i (`SUPABASE_JWT_SECRET`, Dashboard > Settings > API >
+  JWT Settings) — bu **shart**, chunki xuddi shu secret bilan Supabase'ning
+  o'zi ham tokenni tekshiradi va `auth.uid()`ni chiqaradi.
+- **Claims**: `sub` = `users.id` (uuid), `role: "authenticated"`,
+  `aud: "authenticated"`, `telegram_id`.
+- **Muddat (expiry)**: **30 kun** (`setExpirationTime("30d")`,
+  `lib/auth.ts`), cookie `maxAge` ham shu qiymatga sinxron
+  (`SESSION_MAX_AGE_SECONDS`, `lib/constants.ts`). `jose`ning `jwtVerify`
+  `exp`ni avtomatik tekshiradi — muddati o'tgan token har doim rad etiladi.
+- **Refresh mexanizmi**: **yo'q, ataylab shunday tanlangan**. Muddat
+  tugagach foydalanuvchi qayta Telegram orqali kirishi kerak (refresh
+  token emas). Sabab — MVP uchun soddalik; 30 kun yetarlicha uzoq muddat.
+  Kelajakda "sliding session" (faol foydalanuvchida muddatni avtomatik
+  uzaytirish) kerak bo'lsa, alohida middleware qo'shish kerak bo'ladi.
+
+### JWT/service-role secret — topilgan va tuzatilgan muammo
+
+**[O'RTA — tuzatildi] Hardcode qilingan fallback secret.** Avvalgi kodda
+`SUPABASE_JWT_SECRET` va `SUPABASE_SERVICE_ROLE_KEY` sozlanmasa, kod ochiq
+(GitHub'da hammaga ko'rinadigan) matn qiymatlarni fallback sifatida
+ishlatar edi. Bu haqiqiy Supabase'ga qarshi to'g'ridan-to'g'ri
+ekspluatatsiya qilinmasa-da (Supabase o'z haqiqiy secret'i bilan
+tekshiradi, fallback bilan imzolangan token'ni baribir rad etadi), yomon
+amaliyot edi: xato konfiguratsiyada ilova tushunarsiz tarzda ishlamay
+qolardi, o'rniga darhol aniq xato berishi kerak edi.
+
+**Tuzatildi**: `lib/auth.ts` (`getJwtSecretKey`) va `lib/supabase/admin.ts`
+(`createAdminClient`)da fallback olib tashlandi. Endi bu ikki maxfiy
+qiymat sozlanmasa, **birinchi haqiqiy so'rovda** (funksiya chaqirilganda —
+module yuklanganda emas, shuning uchun `next build` buzilmaydi) aniq xato
+tashlanadi. `verifySessionToken` bu xatoni ushlab, `null` qaytaradi — ya'ni
+sessiya tekshiruvi **fail-closed** ishlaydi: xato holatda hech kimga
+noto'g'ri ruxsat berilmaydi, aksincha hamma "tizimga kirmagan" deb
+hisoblanadi.
+
+`NEXT_PUBLIC_SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_ANON_KEY` uchun fallback
+ataylab qoldirildi — bular **maxfiy emas** (anon key brauzerga ochiq
+yuboriladigan public kalit); haqiqiy himoya RLS orqali ta'minlanadi,
+kalitni yashirish orqali emas.
+
+### Telegram Login tekshiruvi
+
+- `lib/telegram.ts -> verifyTelegramLogin` Telegram'ning rasmiy algoritmi
+  bo'yicha ishlaydi
+  (`https://core.telegram.org/widgets/login#checking-authorization`):
+  1. `hash`dan tashqari barcha maydonlar alifbo tartibida `key=value`
+     qilib, `\n` bilan birlashtiriladi (`dataCheckString`).
+  2. `secret_key = SHA256(TELEGRAM_BOT_TOKEN)`.
+  3. `HMAC-SHA256(dataCheckString, secret_key)` hisoblanadi va Telegram
+     yuborgan `hash` bilan **timing-safe** solishtiriladi
+     (`crypto.timingSafeEqual`) — oddiy `===` emas, bu timing attack'dan
+     himoyalanish uchun.
+  4. `auth_date` tekshiriladi: **24 soatdan** eski so'rovlar rad etiladi
+     (`MAX_AUTH_AGE_SECONDS`), kelaqchakdan kelgan sana ham (soat
+     sinxronsizligi uchun ±60 soniya tolerantlik bilan) rad etiladi.
+- **[KICHIK — tuzatildi]**: `hash` maydonining hex formatga mosligi endi
+  qat'iy regex bilan tekshiriladi (`/^[0-9a-f]{64}$/i`) — avval faqat
+  uzunlik taqqoslashga tayangan edi (amalda ekspluatatsiya qilib
+  bo'lmasa-da, `Buffer.from(str, "hex")`ning noto'g'ri belgilarda jim
+  qisqarish xatti-harakatidan qochish uchun kuchaytirildi).
+- **[O'RTA — tuzatildi] Login-CSRF**: `/api/auth/telegram` avval `Origin`
+  header'ni tekshirmas edi. Nazariy xavf: tajovuzkor o'zining haqiqiy
+  (Telegram tomonidan to'g'ri imzolangan!) login ma'lumotini boshqa
+  domendan (masalan, o'z saytidan) qurbon brauzeriga cross-site so'rov
+  sifatida yubortirsa, qurbon o'zi sezmagan holda tajovuzkorning hisobiga
+  "kirgizib qo'yilishi" mumkin edi (klassik "login CSRF"). Endi `Origin`
+  header bizning domenimizga mos kelmasa, so'rov `403` bilan rad etiladi
+  (`isTrustedOrigin`, `app/api/auth/telegram/route.ts`).
+
+### RLS qoidalari — jadval bo'yicha to'liq audit
+
+| Jadval | RLS yoqilganmi | SELECT | INSERT | UPDATE | DELETE |
+|---|---|---|---|---|---|
+| `public.users` | ✅ ha | faqat o'zi (`auth.uid()=id`) | ❌ yo'q (faqat service-role, ro'yxatdan o'tishda) | faqat o'zi | ❌ yo'q (hisobni o'chirish MVP'da yo'q) |
+| `public.listings` | ✅ ha | `status='active'` YOKI `auth.uid()=user_id` | faqat o'zi nomidan | faqat o'zi (`USING` va `WITH CHECK` ikkalasi) | faqat o'zi |
+| `storage.objects` (`listing-images`) | ✅ ha (Supabase default) | hammaga (bucket public) | faqat `auth.uid()`ga mos papka | — | faqat `auth.uid()`ga mos papka |
+
+Tekshirildi: **RLS o'chirilib qolgan (disabled) jadval yo'q** — bu eng
+ko'p uchraydigan xato turi; ikkala jadvalda ham
+`alter table ... enable row level security` mavjud
+(`supabase/schema.sql`, `users` va `listings` bo'limlarida).
+
+`listings_update_own` siyosatida **ham `USING`, ham `WITH CHECK`**
+`auth.uid() = user_id` bilan cheklangani muhim: `USING` foydalanuvchi
+qaysi qatorlarni yangilay olishini, `WITH CHECK` esa yangilangandan
+**keyingi** holat ham shu shartga mos kelishini tekshiradi — aks holda
+foydalanuvchi nazariy jihatdan o'z qatorining `user_id`sini o'zgartirib,
+"tashlab yuborishi" mumkin edi. Bunday zaiflik yo'q.
+
+**Ikki qatlamli himoya (defense-in-depth)**: `PATCH`/`DELETE
+/api/listings/[id]` route'lari `.eq("user_id", user.id)` filtrini ilova
+darajasida ham qo'shadi — RLS'dan mustaqil ravishda. Ya'ni RLS'da
+kelajakda xato bo'lsa ham, ilova darajasidagi filtr alohida himoya
+beradi (va aksincha).
+
+**Operatsion eslatma (kod emas, Supabase sozlash masalasi)**: Supabase
+yangi loyihalarda asimmetrik "JWT Signing Keys" (ES256) tizimiga
+o'tmoqda; eski umumiy (HS256) "JWT Secret" ba'zi yangi loyihalarda
+"Legacy" deb belgilanadi. Loyihani sozlashda Dashboard > Settings > API >
+JWT Settings'da **Legacy JWT Secret yoqilganini** tekshiring — aks holda
+`SUPABASE_JWT_SECRET` bilan imzolangan token'lar Supabase tomonidan
+tanilmay qolishi mumkin.
+
+### Amaliy test: `scripts/test-rls.mjs`
+
+Ikkita test foydalanuvchi (A, B) yaratadigan, A nomidan e'lon joylaydigan
+va **B'ning haqiqiy sessiya tokeni bilan** (ilova ishlatadigani bilan bir
+xil JWT) A'ning e'lonini UPDATE/DELETE qilishga urinadigan avtomatik test
+yozildi (`npm run test:rls`). Tekshiradi:
+
+1. A o'z nomidan e'lon yarata oladi (musbat)
+2. **B, A'ning e'lonini UPDATE qila olmaydi** (0 qator o'zgaradi — xato
+   emas, chunki PostgREST RLS bilan bloklaganda xato qaytarmaydi, shunchaki
+   hech qanday qator WHERE+RLS shartiga mos kelmaydi)
+3. Admin klient bilan tasdiqlanadi: sarlavha haqiqatda o'zgarmagan
+4. **B, A'ning e'lonini DELETE qila olmaydi** (0 qator o'chadi)
+5. Admin klient bilan tasdiqlanadi: e'lon hali ham bazada mavjud
+6. A o'z e'lonini UPDATE qila oladi (musbat)
+7. Anonim foydalanuvchi `status='removed'` e'lonni ko'rmaydi
+8. B, `users` jadvalidan A'ning qatorini o'qiy olmaydi
+
+**MUHIM — ochiq va halol eslatma**: bu skript **shu audit davomida ishga
+tushirilmadi**, chunki joriy (sandbox) muhitda haqiqiy Supabase loyihasi
+yo'q (faqat placeholder `.env`) va Docker daemon ham ishlamaydi
+(tekshirildi: `docker ps` — "no such file or directory"), shuning uchun
+lokal Supabase stack ham ko'tarib bo'lmadi. Skript faqat sintaksis
+jihatdan tekshirildi (`node --check scripts/test-rls.mjs` — xatosiz) va
+yuqoridagi RLS siyosatlarini qo'lda kod orqali tahlil qilish asosida
+to'g'ri ishlashi **kutiladi**, lekin bu **haqiqiy ishga tushirilgan test
+natijasi emas**. Supabase loyihasini sozlagach, **albatta** ishga
+tushiring:
+
+```bash
+npm run test:rls
+# teng: node --env-file=.env.local scripts/test-rls.mjs
+```
+
+Agar biror band ❌ bilan tugasa (ayniqsa 2- yoki 4-band — ya'ni B, A'ning
+e'lonini o'zgartira/o'chira olsa), bu RLS siyosatlari noto'g'ri
+qo'llanganini bildiradi (masalan, `supabase/schema.sql` to'liq ishga
+tushirilmagan yoki policy'lar Dashboard'da qo'lda o'zgartirilgan) — darhol
+Supabase Dashboard > Authentication > Policies'ni tekshiring va bu faylni
+qayta ishga tushiring.
+
+### Cookie xavfsizligi
+
+`cb_session` cookie: `httpOnly: true` (JS'dan o'qib bo'lmaydi, XSS orqali
+o'g'irlash qiyinlashadi), `secure: true` (faqat production'da, HTTPS
+talab qiladi), `sameSite: "lax"` (cross-site POST/PATCH/DELETE
+so'rovlarda cookie yuborilmaydi — bu boshqa yozish endpoint'lari
+(`/api/listings`, `/api/upload` va h.k.) uchun CSRF'ga qarshi asosiy
+himoya; ular uchun alohida CSRF token qo'shilmagan, chunki `SameSite=Lax`
+yetarli darajada himoya qiladi).
+
+### Xulosa — topilgan muammolar ro'yxati (jiddiylik bo'yicha)
+
+| # | Jiddiylik | Muammo | Holat |
+|---|---|---|---|
+| 1 | O'rta | JWT secret / service-role key uchun hardcode fallback | ✅ Tuzatildi |
+| 2 | O'rta | `/api/auth/telegram`'da login-CSRF (Origin tekshiruvi yo'q edi) | ✅ Tuzatildi |
+| 3 | Kichik | Telegram `hash` formatini qat'iy tekshirmaslik | ✅ Tuzatildi |
+| 4 | Past | Telegram login payload'ini 24 soat ichida qayta yuborish (replay) mumkin | Bilib turilgan cheklov — Widget'ning o'zida bor, HTTPS majburiy bo'lsa xavf past; alohida tuzatilmadi |
+| 5 | Ma'lumot | RLS o'chirilgan jadval bormi | ✅ Yo'q, tekshirildi |
+| 6 | Ma'lumot | `listings`/`users` SELECT/UPDATE/DELETE siyosatlari to'g'riligi | ✅ To'g'ri, tekshirildi (jadvalga qarang) |
+| 7 | Ma'lumot | Amaliy A/B cross-user testi | ✍️ Yozildi, lekin **hali ishga tushirilmagan** — Supabase sozlagach ishga tushiring |
+
 ## Loyiha strukturasi
 
 ```
@@ -107,6 +282,7 @@ lib/
   constants.ts, utils.ts
 types/index.ts                  — Listing, AppUser va h.k. TS tiplari
 supabase/schema.sql              — to'liq DB sxema + RLS + storage siyosati
+scripts/test-rls.mjs             — RLS xavfsizlik testi (npm run test:rls)
 ```
 
 ## .env o'zgaruvchilari (`.env.example`'ga qarang, haqiqiy qiymat yo'q)

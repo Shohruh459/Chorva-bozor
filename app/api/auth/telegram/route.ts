@@ -7,7 +7,34 @@ import type { TelegramLoginPayload } from "@/types";
 
 export const runtime = "nodejs";
 
+/**
+ * Login-CSRF himoyasi: agar so'rov boshqa domendan (Origin header mos
+ * kelmasa) kelsa, rad etamiz. Aks holda, tajovuzkor o'zining haqiqiy
+ * (Telegram tomonidan to'g'ri imzolangan) login ma'lumotini qurbonning
+ * brauzeridan cross-site so'rov orqali yuborib, qurbonni o'zi bilmagan
+ * holda tajovuzkorning hisobiga "kirgizib qo'yishi" mumkin edi.
+ * Ba'zi eski/maxsus mijozlar Origin header yubormasligi mumkin — bunday
+ * holatda so'rovni bloklamaymiz (false negative yaxshiroq, chunki bu
+ * qo'shimcha qatlam, yagona himoya emas: hash tekshiruvi asosiy himoya).
+ */
+function isTrustedOrigin(request: NextRequest): boolean {
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === request.nextUrl.host;
+  } catch {
+    return false;
+  }
+}
+
 export async function POST(request: NextRequest) {
+  if (!isTrustedOrigin(request)) {
+    return NextResponse.json(
+      { error: "Noto'g'ri manba (Origin) so'rovi" },
+      { status: 403 }
+    );
+  }
+
   let body: TelegramLoginPayload;
   try {
     body = (await request.json()) as TelegramLoginPayload;

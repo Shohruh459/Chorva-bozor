@@ -4,10 +4,23 @@ import { SESSION_COOKIE_NAME } from "@/lib/constants";
 import { createServerClient } from "@/lib/supabase/server";
 import type { AppUser } from "@/types";
 
-const jwtSecret =
-  process.env.SUPABASE_JWT_SECRET ||
-  "placeholder-jwt-secret-must-be-at-least-32-characters-long";
-const secretKey = new TextEncoder().encode(jwtSecret);
+/**
+ * DIQQAT (xavfsizlik): bu yerda hardcode qilingan fallback secret
+ * ATAYLAB ishlatilmaydi. Agar SUPABASE_JWT_SECRET .env'da bo'lmasa,
+ * runtime'da (birinchi so'rov kelganda) aniq xato tashlanadi — bu
+ * `next build`ni buzmaydi, chunki qiymat faqat funksiya chaqirilganda
+ * (request vaqtida) o'qiladi, module yuklanganda emas.
+ */
+function getJwtSecretKey(): Uint8Array {
+  const secret = process.env.SUPABASE_JWT_SECRET;
+  if (!secret) {
+    throw new Error(
+      "SUPABASE_JWT_SECRET .env'da sozlanmagan. Bu Supabase RLS bilan " +
+        "ishlash uchun majburiy (Dashboard > Settings > API > JWT Settings)."
+    );
+  }
+  return new TextEncoder().encode(secret);
+}
 
 export interface SessionPayload {
   sub: string; // users.id
@@ -33,14 +46,14 @@ export async function signSessionToken(params: {
     .setIssuedAt()
     .setExpirationTime("30d")
     .setAudience("authenticated")
-    .sign(secretKey);
+    .sign(getJwtSecretKey());
 }
 
 export async function verifySessionToken(
   token: string
 ): Promise<SessionPayload | null> {
   try {
-    const { payload } = await jwtVerify(token, secretKey, {
+    const { payload } = await jwtVerify(token, getJwtSecretKey(), {
       audience: "authenticated",
     });
     if (!payload.sub || payload.telegram_id === undefined) return null;

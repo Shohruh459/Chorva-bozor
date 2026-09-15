@@ -14,7 +14,11 @@ export function verifyTelegramLogin(
   if (!botToken) return false;
 
   const { hash, ...rest } = payload;
-  if (!hash) return false;
+  // Hex formatini qat'iy tekshiramiz — Buffer.from(str, "hex") noto'g'ri
+  // belgilarda jim tarzda qisqargan buffer qaytaradi, shuning uchun uzunlik
+  // solishtiruvidan oldin format haqida aniq bo'lish kerak (defense-in-depth;
+  // pastdagi uzunlik tekshiruvi baribir himoya qiladi, lekin bu aniqroq).
+  if (!hash || !/^[0-9a-f]{64}$/i.test(hash)) return false;
 
   const dataCheckString = Object.entries(rest)
     .filter(([, value]) => value !== undefined && value !== null)

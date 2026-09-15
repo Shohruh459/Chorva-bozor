@@ -12,6 +12,12 @@ const supabaseAnonKey =
  * RLS siyosatlari shu JWT ichidagi `sub` claim orqali (auth.uid()) ishlaydi.
  * Token berilmasa, cookie'dan o'qiladi; u ham bo'lmasa — anon (public) klient
  * sifatida ishlaydi (faqat status='active' e'lonlarni ko'radi).
+ *
+ * Bu yerdagi supabaseAnonKey — public (maxfiy bo'lmagan) kalit, shuning
+ * uchun placeholder fallback xavfsiz. `accessToken` esa allaqachon
+ * lib/auth.ts -> verifySessionToken orqali imzosi tekshirilgan bo'ladi
+ * (bu yerda faqat Supabase'ga uzatiladi, qayta ishonch bildirilmaydi —
+ * yakuniy tekshiruv har doim Supabase PostgREST tomonida, RLS orqali).
  */
 export async function createServerClient(token?: string) {
   const accessToken = token ?? (await cookies()).get(SESSION_COOKIE_NAME)?.value;

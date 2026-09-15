@@ -6,6 +6,13 @@ import { createClient } from "@supabase/supabase-js";
 // Build vaqtida .env mavjud bo'lmasa ham xato bermasligi uchun
 // placeholder qiymatlar bilan fallback qilinadi (runtime'da haqiqiy
 // so'rov ketganda .env sozlangan bo'lishi shart).
+//
+// Xavfsizlik eslatmasi: anon key — MAXFIY KALIT EMAS, u brauzerga
+// ataylab yuboriladigan public kalit (nomidan ham ko'rinib turibdi).
+// Shuning uchun bu yerda placeholder fallback xavfsiz — haqiqiy
+// himoya RLS siyosatlari orqali ta'minlanadi, kalitni yashirish orqali
+// emas. SUPABASE_JWT_SECRET va SUPABASE_SERVICE_ROLE_KEY esa MAXFIY —
+// ular uchun fallback yo'q (lib/auth.ts, lib/supabase/admin.ts'ga qarang).
 const supabaseUrl =
   process.env.NEXT_PUBLIC_SUPABASE_URL || "https://placeholder.supabase.co";
 const supabaseAnonKey =
